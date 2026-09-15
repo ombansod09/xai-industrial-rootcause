@@ -1,0 +1,22 @@
+seed: 42
+data:
+  dataset_name: metropt
+  raw_path: data/raw/dataset_train.csv
+  processed_path: data/processed/metropt.parquet
+  timestamp_column: timestamp
+split:
+  strategy: chronological
+  train_fraction: 0.70
+  validation_fraction: 0.15
+  test_fraction: 0.15
+  gap_seconds: 300
+window:
+  length: 60
+  stride: 10
+xai:
+  top_k: 5
+  perturbation_repeats: 30
+  perturbation_scale: 0.01
+evaluation:
+  bootstrap_repeats: 1000
+  random_seeds: [13, 42, 77, 101, 202]
