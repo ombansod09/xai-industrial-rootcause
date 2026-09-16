@@ -14,7 +14,10 @@ data/processed/
 *.pt
 *.pth
 artifacts/
+results/
 reports/generated/
+*.egg-info/
+build/
 .env
 .env.*
 !.env.example
