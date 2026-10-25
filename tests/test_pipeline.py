@@ -21,6 +21,7 @@ def test_pipeline_returns_expected_outputs_and_stability():
     result = analyze_dataframe(sample_frame(), perturbation_repeats=5)
     assert result.summary["rows_analyzed"] == 160
     assert result.summary["training_rows"] == 112
+    assert result.selected_row["row_index"] >= result.summary["training_rows"]
     assert result.summary["sensor_count"] == 3
     assert 0.0 <= result.summary["top_k_jaccard_stability"] <= 1.0
     assert {"sensor", "deviation_score", "rank"}.issubset(result.explanations.columns)
@@ -40,3 +41,4 @@ def test_pipeline_rejects_too_few_rows():
 def test_pipeline_rejects_invalid_contamination():
     with pytest.raises(ValueError, match="contamination"):
         analyze_dataframe(sample_frame(), contamination=0.8)
+

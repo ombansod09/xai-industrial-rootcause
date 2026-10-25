@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import combinations
+from sys import flags
 from typing import Any
 
 import numpy as np
@@ -133,10 +134,16 @@ def analyze_dataframe(
         timeline.insert(1, "timestamp", df[ts_col].astype(str).to_numpy())
 
     # Rank each sensor by absolute deviation from the training distribution for the most anomalous flagged row.
-    candidate_indices = np.flatnonzero(flags)
+    # Select the example only from the scored tail, never the training prefix.
+    candidate_indices = np.flatnonzero(flags[split_at:]) + split_at
+
     if len(candidate_indices) == 0:
-        candidate_indices = np.array([int(np.argmax(raw_scores))])
-    selected_idx = int(candidate_indices[np.argmax(raw_scores[candidate_indices])])
+        scored_indices = np.arange(split_at, len(df))
+        selected_idx = int(scored_indices[np.argmax(raw_scores[scored_indices])])
+    else:
+        selected_idx = int(
+            candidate_indices[np.argmax(raw_scores[candidate_indices])]
+    )
     base_dev = _robust_deviation(X[selected_idx:selected_idx + 1], X_train)[0]
     base_order = np.argsort(-base_dev)
     explanations = pd.DataFrame({
