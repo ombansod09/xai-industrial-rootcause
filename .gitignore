@@ -20,3 +20,4 @@ reports/generated/
 !.env.example
 .vscode/
 .idea/
+*.egg-info/
