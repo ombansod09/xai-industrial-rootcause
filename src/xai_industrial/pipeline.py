@@ -6,8 +6,6 @@ The detector and scaler are fitted on the chronological training partition only.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from itertools import combinations
-from sys import flags
 from typing import Any
 
 import numpy as np
@@ -15,7 +13,7 @@ import pandas as pd
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import RobustScaler
 
-from xai_industrial.xai.agreement import jaccard
+from xai_industrial.xai.stability import evaluate_ranking_stability
 
 
 @dataclass
@@ -52,6 +50,7 @@ def analyze_dataframe(
     contamination: float = 0.05,
     seed: int = 42,
     max_rows: int = 100_000,
+    purge_rows: int = 0,
     perturbation_repeats: int = 20,
     perturbation_scale: float = 0.01,
 ) -> AnalysisResult:
@@ -63,6 +62,8 @@ def analyze_dataframe(
     """
     if not 0.001 <= float(contamination) <= 0.25:
         raise ValueError("contamination must be between 0.001 and 0.25")
+    if isinstance(purge_rows, bool) or not isinstance(purge_rows, int) or purge_rows < 0:
+        raise ValueError("purge_rows must be a non-negative integer")
     if frame.empty:
         raise ValueError("The uploaded dataset is empty.")
     if len(frame) > max_rows:
@@ -99,18 +100,37 @@ def analyze_dataframe(
 
     Xdf = df[sensor_cols].replace([np.inf, -np.inf], np.nan)
     # Learn imputation values from the training prefix only.
+    
+    # Establish chronological training and evaluation boundaries.
     split_at = max(20, int(len(df) * 0.70))
     if split_at >= len(df):
         split_at = len(df) - 1
+
+    eval_start = split_at + purge_rows
+    if eval_start >= len(df):
+        raise ValueError(
+            "purge_rows leaves no evaluation rows; reduce purge_rows "
+            "or provide more data."
+        )
+
+    # Learn imputation values from training data only.
     train_medians = Xdf.iloc[:split_at].median().fillna(0.0)
     Xdf = Xdf.fillna(train_medians).fillna(0.0)
-    # Constant features provide no useful ranking signal and can destabilize explanations.
-    nonconstant = [c for c in sensor_cols if Xdf[c].iloc[:split_at].nunique(dropna=False) > 1]
+
+    # Constant features provide no useful ranking signal.
+    nonconstant = [
+        c for c in sensor_cols
+        if Xdf[c].iloc[:split_at].nunique(dropna=False) > 1
+    ]
     if not nonconstant:
-        raise ValueError("All usable sensor columns are constant in the training partition.")
+        raise ValueError(
+            "All usable sensor columns are constant in the training partition."
+        )
+
     sensor_cols = nonconstant
     X = Xdf[sensor_cols].to_numpy(dtype=float)
     X_train = X[:split_at]
+
 
     scaler = RobustScaler()
     X_train_scaled = scaler.fit_transform(X_train)
@@ -129,21 +149,30 @@ def analyze_dataframe(
         "anomaly_score": raw_scores,
         "score_percentile": score_percentile,
         "is_anomaly": flags,
+        "is_training": np.arange(len(df)) < split_at,
+        "is_purged": (
+            (np.arange(len(df)) >= split_at)
+            & (np.arange(len(df)) < eval_start)
+        ),
+        "is_evaluation": np.arange(len(df)) >= eval_start,
     })
     if ts_col:
         timeline.insert(1, "timestamp", df[ts_col].astype(str).to_numpy())
 
     # Rank each sensor by absolute deviation from the training distribution for the most anomalous flagged row.
     # Select the example only from the scored tail, never the training prefix.
-    candidate_indices = np.flatnonzero(flags[split_at:]) + split_at
+    
+    # Only post-purge evaluation observations may be selected as incidents.
+    candidate_indices = np.flatnonzero(flags[eval_start:]) + eval_start
 
     if len(candidate_indices) == 0:
-        scored_indices = np.arange(split_at, len(df))
+        scored_indices = np.arange(eval_start, len(df))
         selected_idx = int(scored_indices[np.argmax(raw_scores[scored_indices])])
     else:
         selected_idx = int(
             candidate_indices[np.argmax(raw_scores[candidate_indices])]
-    )
+        )
+
     base_dev = _robust_deviation(X[selected_idx:selected_idx + 1], X_train)[0]
     base_order = np.argsort(-base_dev)
     explanations = pd.DataFrame({
@@ -155,31 +184,39 @@ def analyze_dataframe(
     explanations["rank"] = np.arange(1, len(explanations) + 1)
     explanations["interpretation"] = "Deviation from training behaviour; candidate contributor, not proven cause"
 
-    # Perturb the selected observation slightly and compare top-k rankings.
-    rng = np.random.default_rng(seed)
-    feature_scale = np.std(X_train, axis=0)
-    feature_scale = np.where(feature_scale > 1e-9, feature_scale, 1.0)
-    rankings: list[set[str]] = []
-    k = min(5, len(sensor_cols))
-    for _ in range(max(2, int(perturbation_repeats))):
-        perturbed = X[selected_idx] + rng.normal(0.0, float(perturbation_scale), size=len(sensor_cols)) * feature_scale
-        dev = _robust_deviation(perturbed.reshape(1, -1), X_train)[0]
-        rankings.append(set(np.asarray(sensor_cols)[np.argsort(-dev)[:k]].tolist()))
-    pairwise = [jaccard(a, b) for a, b in combinations(rankings, 2)]
-    stability = float(np.mean(pairwise)) if pairwise else 1.0
+    
+    # Evaluate top-k deviation-ranking stability using the shared helper.
+    # This measures ranking consistency, not detector stability or faithfulness.
+    stability_result = evaluate_ranking_stability(
+        observation=X[selected_idx],
+        training_data=X_train,
+        sensor_names=sensor_cols,
+        repeats=max(2, int(perturbation_repeats)),
+        perturbation_scale=float(perturbation_scale),
+        seed=int(seed),
+        top_k=5,
+    )
+    stability = stability_result["top_k_jaccard_stability"]
+    stability_repeats_used = stability_result["stability_repeats"]
+
 
     summary = {
         "rows_analyzed": int(len(df)),
         "sensor_count": int(len(sensor_cols)),
         "training_rows": int(split_at),
-        "scored_rows": int(len(df) - split_at),
+        "purged_rows": int(purge_rows),
+        "scored_rows": int(len(df) - eval_start),
         "anomaly_count": int(flags.sum()),
         "anomaly_rate_pct": float(flags.mean() * 100.0),
+        "evaluation_anomaly_count": int(flags[eval_start:].sum()),
+        "evaluation_anomaly_rate_pct": float(
+            flags[eval_start:].mean() * 100.0
+        ),
         "selected_row_index": selected_idx,
         "selected_anomaly_score": float(raw_scores[selected_idx]),
         "selected_score_percentile": float(score_percentile[selected_idx]),
         "top_k_jaccard_stability": stability,
-        "stability_repeats": int(max(2, int(perturbation_repeats))),
+        "stability_repeats": stability_repeats_used,
         "timestamp_column": ts_col,
         "sensor_columns": sensor_cols,
         "model": "IsolationForest",

@@ -42,3 +42,40 @@ def test_pipeline_rejects_invalid_contamination():
     with pytest.raises(ValueError, match="contamination"):
         analyze_dataframe(sample_frame(), contamination=0.8)
 
+
+def test_pipeline_purge_gap_preserves_partition_boundaries():
+    result = analyze_dataframe(sample_frame(), purge_rows=10)
+
+    assert result.summary["rows_analyzed"] == 160
+    assert result.summary["training_rows"] == 112
+    assert result.summary["purged_rows"] == 10
+    assert result.summary["scored_rows"] == 38
+
+    assert result.timeline["is_training"].sum() == 112
+    assert result.timeline["is_purged"].sum() == 10
+    assert result.timeline["is_evaluation"].sum() == 38
+
+    assert not result.timeline.loc[112:121, "is_evaluation"].any()
+    assert result.timeline.loc[122:, "is_evaluation"].all()
+    assert result.selected_row["row_index"] >= 122
+
+
+def test_pipeline_zero_purge_preserves_scored_row_count():
+    result = analyze_dataframe(sample_frame(), purge_rows=0)
+
+    assert result.summary["training_rows"] == 112
+    assert result.summary["purged_rows"] == 0
+    assert result.summary["scored_rows"] == 48
+    assert result.timeline["is_evaluation"].sum() == 48
+    assert result.selected_row["row_index"] >= 112
+
+
+def test_pipeline_rejects_purge_that_leaves_no_evaluation_rows():
+    with pytest.raises(ValueError, match="purge_rows leaves no evaluation rows"):
+        analyze_dataframe(sample_frame(), purge_rows=48)
+
+
+@pytest.mark.parametrize("purge_rows", [-1, 1.5, True])
+def test_pipeline_rejects_invalid_purge_rows(purge_rows):
+    with pytest.raises(ValueError, match="purge_rows"):
+        analyze_dataframe(sample_frame(), purge_rows=purge_rows)
